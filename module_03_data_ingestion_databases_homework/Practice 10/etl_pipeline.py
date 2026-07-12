@@ -62,4 +62,3 @@ sales_file_path = r'D:\!Taisiya\innowise_lab_jun_2026\csv_files\sales.csv'
 df = read_csv(sales_file_path, ';')
 match = re.search(r'([^\\/]+)\.csv$', sales_file_path)
 load_data(df, 'bronze_'+match.group(1), engine, chunksize=10000)
-
