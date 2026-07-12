@@ -1,4 +1,5 @@
 import pandas as pd
+<<<<<<< HEAD
 from sqlalchemy import create_engine
 import re
 import os
@@ -9,6 +10,13 @@ from env import (
     CHUNK_SIZE,
     SEPARATOR
 )
+=======
+from sqlalchemy import create_engine, Column, Integer, String, Float 
+from sqlalchemy.orm import declarative_base, sessionmaker
+import re
+
+connectionString = 'postgresql://postgres:220056smlTVB@localhost/EcoMarket'
+>>>>>>> 0bc3b1acdf5d09c9e55716cdbf98562323f08e65
 
 def load_data(df, table_name, con, schema='public2', if_exists='append', index=False, chunksize=None):
     try:
@@ -67,3 +75,7 @@ sales_file_path = r'D:\!Taisiya\innowise_lab_jun_2026\csv_files\sales.csv'
 df = read_csv(sales_file_path, ';')
 match = re.search(r'([^\\/]+)\.csv$', sales_file_path)
 load_data(df, 'bronze_'+match.group(1), engine, chunksize=10000)
+<<<<<<< HEAD
+=======
+
+>>>>>>> 0bc3b1acdf5d09c9e55716cdbf98562323f08e65
