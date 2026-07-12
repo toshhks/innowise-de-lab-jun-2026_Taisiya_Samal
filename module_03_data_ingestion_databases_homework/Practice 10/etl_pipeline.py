@@ -1,9 +1,14 @@
 import pandas as pd
-from sqlalchemy import create_engine, Column, Integer, String, Float 
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine
 import re
-
-connectionString = 'postgresql://postgres:220056smlTVB@localhost/EcoMarket'
+import os
+from env import (
+    connectionString,
+    DB_SCHEMA,
+    CSV_PATH,
+    CHUNK_SIZE,
+    SEPARATOR
+)
 
 def load_data(df, table_name, con, schema='public2', if_exists='append', index=False, chunksize=None):
     try:
@@ -62,3 +67,4 @@ sales_file_path = r'D:\!Taisiya\innowise_lab_jun_2026\csv_files\sales.csv'
 df = read_csv(sales_file_path, ';')
 match = re.search(r'([^\\/]+)\.csv$', sales_file_path)
 load_data(df, 'bronze_'+match.group(1), engine, chunksize=10000)
+
