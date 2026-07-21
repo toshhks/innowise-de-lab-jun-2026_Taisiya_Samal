@@ -1,0 +1,419 @@
+================================================================================
+              ОТЧЁТ: ПРОЕКТИРОВАНИЕ STAR SCHEMA (GOLD)
+                 EcoMarket DWH | Этап 3.2 — Dimension Tables
+================================================================================
+
+1. ОБЗОР ИЗМЕРЕНИЙ
+--------------------------------------------------------------------------------
+
+  Схема Gold содержит 8 dimension-таблиц (минимум 7 — выполнено).
+
+  Таблица           | Тип измерения        | SCD   | Источник (silver)
+  ------------------|----------------------|-------|----------------------------------
+  dim_date          | Date / Time          | Type0 | sales.sales_timestamp
+  dim_product       | Product              | Type2 | products + categories
+  dim_category      | Category             | Type1 | categories
+  dim_customer      | Customer             | Type1 | customers
+  dim_employee      | Employee             | Type1 | employees
+  dim_shop          | Shop / Store         | Type1 | shops
+  dim_city          | Location (City)      | Type1 | cities
+  dim_country       | Location (Country)   | Type1 | countries
+
+  Типы dimension-таблиц (Kimball):
+
+    Type 0 (Fixed)     — dim_date: генерируется один раз, не изменяется
+    Type 1 (Overwrite) — dim_category, dim_customer, dim_employee,
+                         dim_shop, dim_city, dim_country: изменения перезаписывают
+                         текущую запись
+    Type 2 (History)   — dim_product: история изменений сохраняется
+                         (valid_from_dt, valid_to_dt, is_current)
+
+  Связь с fact_sales:
+    fact_sales ссылается ТОЛЬКО на surrogate keys (date_key, product_key, ...).
+    Business keys (product_id, customer_id, ...) хранятся в dimension как атрибуты.
+
+
+2. ОБЩИЕ ПРАВИЛА ПРОЕКТИРОВАНИЯ
+--------------------------------------------------------------------------------
+
+  Типы данных:
+    - surrogate keys:     SERIAL / INTEGER
+    - business keys:      INTEGER NOT NULL
+    - денежные атрибуты:  NUMERIC(p, s)  (напр. price NUMERIC(10,2))
+    - даты:               DATE, TIMESTAMP
+    - флаги:              BOOLEAN NOT NULL
+
+  Ограничения:
+    - NOT NULL на PK, business key, is_current (SCD2)
+    - UNIQUE на business key (для Type1) или (business key + valid_from_dt) для SCD2
+    - CHECK где обосновано (price >= 0, discount 0-1, is_current IN (true,false))
+
+  Индексы:
+    - PK — автоматически
+    - UNIQUE INDEX на business key
+    - INDEX на каждый FK в dimension-таблицах
+    - INDEX на is_current для SCD2 (быстрый lookup текущей версии)
+
+
+3. DIM_DATE (Type 0 — Date Dimension)
+--------------------------------------------------------------------------------
+
+3.1. Назначение
+  Справочник календарных дат для анализа продаж по времени.
+
+3.2. Ключи
+  Surrogate key:  date_key      INTEGER       PK  (формат YYYYMMDD)
+  Business key:   full_date     DATE          UNIQUE
+
+3.3. Структура
+  --------------------------------------------------------------------------
+  Колонка        | Тип           | NOT NULL | Описание
+  ---------------|---------------|----------|----------------------------------
+  date_key       | INTEGER       | YES      | PK, YYYYMMDD (напр. 20230519)
+  full_date      | DATE          | YES      | Календарная дата
+  day_of_week    | SMALLINT      | YES      | 1 (Пн) – 7 (Вс)
+  week_num       | SMALLINT      | YES      | Номер недели (ISO)
+  month_num      | SMALLINT      | YES      | 1–12
+  month_name     | VARCHAR(20)   | YES      | January, February, ...
+  quarter_num    | SMALLINT      | YES      | 1–4
+  year_num       | SMALLINT      | YES      | 2022, 2023, ...
+  --------------------------------------------------------------------------
+
+  CHECK: day_of_week BETWEEN 1 AND 7
+  CHECK: month_num BETWEEN 1 AND 12
+  CHECK: quarter_num BETWEEN 1 AND 4
+
+  INDEX:  UNIQUE (full_date)
+
+3.4. Дедупликация
+  Одна строка на каждую уникальную calendar date. Генерируется из диапазона
+  дат в silver.sales (min/max sales_timestamp) + буфер.
+
+3.5. Обработка изменений (Type 0)
+  Даты не изменяются. Таблица заполняется один раз, дополняется при
+  появлении новых дат в fact.
+
+
+4. DIM_CATEGORY (Type 1 — Category Dimension)
+--------------------------------------------------------------------------------
+
+4.1. Назначение
+  Справочник категорий товаров (Fruits, Vegetables, ...).
+
+4.2. Ключи
+  Surrogate key:  category_key   SERIAL        PK
+  Business key:   category_id    INTEGER       UNIQUE
+
+4.3. Структура
+  --------------------------------------------------------------------------
+  Колонка         | Тип           | NOT NULL | Описание
+  ----------------|---------------|----------|----------------------------------
+  category_key    | SERIAL        | YES      | PK
+  category_id     | INTEGER       | YES      | Business key (silver.categories)
+  category_name   | VARCHAR(100)  | YES      | Название категории
+  --------------------------------------------------------------------------
+
+  UNIQUE: category_id
+  INDEX:  category_id
+
+4.4. Дедупликация
+  DISTINCT ON (category_id) — одна запись на category_id.
+
+4.5. Обработка изменений (SCD Type 1)
+  При изменении category_name — UPDATE существующей строки (перезапись).
+  Исторические fact-строки «увидят» новое имя (допустимо для категорий).
+
+
+5. DIM_PRODUCT (Type 2 — Product Dimension) *** SCD2 ***
+--------------------------------------------------------------------------------
+
+5.1. Назначение
+  Справочник товаров с историей изменений цены и атрибутов.
+  SCD2 выбран потому что price и атрибуты продукта меняются во времени
+  (modify_timestamp в silver.products), а исторические продажи должны
+  ссылаться на версию продукта, актуальную на момент продажи.
+
+5.2. Ключи
+  Surrogate key:  product_key    SERIAL        PK
+  Business key:   product_id     INTEGER       (NOT unique в SCD2!)
+
+5.3. Структура
+  --------------------------------------------------------------------------
+  Колонка          | Тип           | NOT NULL | Описание
+  -----------------|---------------|----------|----------------------------------
+  product_key      | SERIAL        | YES      | PK (суррогатный)
+  product_id       | INTEGER       | YES      | Business key
+  product_name     | VARCHAR(255)  | YES      | Название товара
+  price            | NUMERIC(10,2) | YES      | Розничная цена
+  category_key     | INTEGER       | YES      | FK -> dim_category
+  product_class    | VARCHAR(1)    | YES      | Класс A/B/C
+  is_resistant     | BOOLEAN       | YES      | Устойчивость
+  is_allergic      | BOOLEAN       | YES      | Аллергенность
+  vitality_days    | INTEGER       | YES      | Срок годности (дней)
+  valid_from_dt    | TIMESTAMP     | YES      | Начало действия версии  *** SCD2
+  valid_to_dt      | TIMESTAMP     | YES      | Конец действия версии   *** SCD2
+  is_current       | BOOLEAN       | YES      | Текущая версия          *** SCD2
+  --------------------------------------------------------------------------
+
+  FK:     category_key -> dim_category(category_key)
+  CHECK:  price >= 0
+  CHECK:  vitality_days > 0
+  CHECK:  valid_to_dt >= valid_from_dt
+  CHECK:  is_current IN (true, false)
+  UNIQUE: (product_id, valid_from_dt)
+  INDEX:  product_id
+  INDEX:  is_current WHERE is_current = true
+  INDEX:  category_key
+
+5.4. Дедупликация
+  Для каждого product_id допускается несколько строк (версии SCD2).
+  Только одна строка с is_current = true на product_id.
+
+5.5. Обработка изменений (SCD Type 2)
+  При загрузке из silver.products:
+    1. Сравнить атрибуты с текущей версией (is_current = true)
+    2. Если изменились (price, product_name, class, ...):
+       a) UPDATE текущей: valid_to_dt = NOW(), is_current = false
+       b) INSERT новую версию: valid_from_dt = NOW(),
+          valid_to_dt = '9999-12-31', is_current = true
+    3. Если product_id новый — INSERT первую версию
+  Lookup для fact: product_key WHERE product_id = ? AND
+                   sales_timestamp BETWEEN valid_from_dt AND valid_to_dt
+
+
+6. DIM_CUSTOMER (Type 1 — Customer Dimension)
+--------------------------------------------------------------------------------
+
+6.1. Назначение
+  Справочник клиентов.
+
+6.2. Ключи
+  Surrogate key:  customer_key   SERIAL        PK
+  Business key:   customer_id    INTEGER       UNIQUE
+
+6.3. Структура
+  --------------------------------------------------------------------------
+  Колонка          | Тип           | NOT NULL | Описание
+  -----------------|---------------|----------|----------------------------------
+  customer_key     | SERIAL        | YES      | PK
+  customer_id      | INTEGER       | YES      | Business key
+  first_name       | VARCHAR(100)  | YES      | Имя
+  middle_initial   | VARCHAR(1)    | YES      | Отчество (инициал)
+  last_name        | VARCHAR(100)  | YES      | Фамилия
+  full_name        | VARCHAR(255)  | YES      | first + middle + last
+  city_key         | INTEGER       | YES      | FK -> dim_city
+  address          | VARCHAR(255)  | YES      | Адрес
+  --------------------------------------------------------------------------
+
+  FK:     city_key -> dim_city(city_key)
+  UNIQUE: customer_id
+  INDEX:  customer_id, city_key
+
+6.4. Дедупликация
+  DISTINCT ON (customer_id) — одна запись на клиента.
+
+6.5. Обработка изменений (SCD Type 1)
+  UPDATE при изменении имени или адреса. История не хранится.
+
+
+7. DIM_EMPLOYEE (Type 1 — Employee Dimension)
+--------------------------------------------------------------------------------
+
+7.1. Назначение
+  Справочник сотрудников, оформляющих продажи.
+
+7.2. Ключи
+  Surrogate key:  employee_key   SERIAL        PK
+  Business key:   employee_id    INTEGER       UNIQUE
+
+7.3. Структура
+  --------------------------------------------------------------------------
+  Колонка          | Тип           | NOT NULL | Описание
+  -----------------|---------------|----------|----------------------------------
+  employee_key     | SERIAL        | YES      | PK
+  employee_id      | INTEGER       | YES      | Business key
+  first_name       | VARCHAR(100)  | YES      | Имя
+  middle_initial   | VARCHAR(1)    | YES      | Инициал
+  last_name        | VARCHAR(100)  | YES      | Фамилия
+  full_name        | VARCHAR(255)  | YES      | ФИО
+  birth_date       | DATE          | YES      | Дата рождения
+  gender           | VARCHAR(1)    | YES      | Пол (M/F)
+  hire_date        | DATE          | YES      | Дата найма
+  shop_key         | INTEGER       | YES      | FK -> dim_shop
+  city_key         | INTEGER       | YES      | FK -> dim_city
+  --------------------------------------------------------------------------
+
+  FK:     shop_key -> dim_shop, city_key -> dim_city
+  CHECK:  hire_date > birth_date
+  CHECK:  gender IN ('M', 'F')
+  UNIQUE: employee_id
+  INDEX:  employee_id, shop_key, city_key
+
+7.4. Дедупликация
+  DISTINCT ON (employee_id).
+
+7.5. Обработка изменений (SCD Type 1)
+  UPDATE при смене shop_key или персональных данных.
+
+
+8. DIM_SHOP (Type 1 — Shop / Store Dimension)
+--------------------------------------------------------------------------------
+
+8.1. Назначение
+  Справочник магазинов сети EcoMarket.
+
+8.2. Ключи
+  Surrogate key:  shop_key       SERIAL        PK
+  Business key:   shop_id        INTEGER       UNIQUE
+
+8.3. Структура
+  --------------------------------------------------------------------------
+  Колонка          | Тип           | NOT NULL | Описание
+  -----------------|---------------|----------|----------------------------------
+  shop_key         | SERIAL        | YES      | PK
+  shop_id          | INTEGER       | YES      | Business key
+  address          | VARCHAR(255)  | YES      | Адрес магазина
+  city_key         | INTEGER       | YES      | FK -> dim_city
+  --------------------------------------------------------------------------
+
+  FK:     city_key -> dim_city(city_key)
+  UNIQUE: shop_id
+  INDEX:  shop_id, city_key
+
+8.4. Дедупликация
+  DISTINCT ON (shop_id).
+
+8.5. Обработка изменений (SCD Type 1)
+  UPDATE address при изменении в источнике.
+
+
+9. DIM_CITY (Type 1 — Location / City Dimension)
+--------------------------------------------------------------------------------
+
+9.1. Назначение
+  Справочник городов (уровень dim_location в иерархии Geography).
+
+9.2. Ключи
+  Surrogate key:  city_key       SERIAL        PK
+  Business key:   city_id        INTEGER       UNIQUE
+
+9.3. Структура
+  --------------------------------------------------------------------------
+  Колонка          | Тип           | NOT NULL | Описание
+  -----------------|---------------|----------|----------------------------------
+  city_key         | SERIAL        | YES      | PK
+  city_id          | INTEGER       | YES      | Business key
+  city_name        | VARCHAR(100)  | YES      | Название города
+  zipcode          | VARCHAR(20)   | YES      | Почтовый индекс
+  country_key      | INTEGER       | YES      | FK -> dim_country
+  --------------------------------------------------------------------------
+
+  FK:     country_key -> dim_country(country_key)
+  UNIQUE: city_id
+  INDEX:  city_id, country_key
+
+9.4. Дедупликация
+  DISTINCT ON (city_id).
+
+9.5. Обработка изменений (SCD Type 1)
+  UPDATE city_name, zipcode при изменении.
+
+
+10. DIM_COUNTRY (Type 1 — Country Dimension)
+--------------------------------------------------------------------------------
+
+10.1. Назначение
+  Справочник стран (верхний уровень географии).
+
+10.2. Ключи
+  Surrogate key:  country_key    SERIAL        PK
+  Business key:   country_id     INTEGER       UNIQUE
+
+10.3. Структура
+  --------------------------------------------------------------------------
+  Колонка          | Тип           | NOT NULL | Описание
+  -----------------|---------------|----------|----------------------------------
+  country_key      | SERIAL        | YES      | PK
+  country_id       | INTEGER       | YES      | Business key
+  country_name     | VARCHAR(100)  | YES      | Название страны
+  country_code     | VARCHAR(2)    | YES      | ISO-код (DE, FR, ...)
+  --------------------------------------------------------------------------
+
+  UNIQUE: country_id, country_code
+  INDEX:  country_id
+
+10.4. Дедупликация
+  DISTINCT ON (country_id).
+
+10.5. Обработка изменений (SCD Type 1)
+  UPDATE country_name при изменении.
+
+
+11. ИЕРАРХИИ ИЗМЕРЕНИЙ (без прямых FK в fact)
+--------------------------------------------------------------------------------
+
+  Geography:   dim_country -> dim_city -> dim_shop / dim_customer
+  Product:     dim_category -> dim_product -> fact_sales
+
+  fact_sales.city_key  -> dim_city  -> dim_country
+  fact_sales.product_key -> dim_product -> dim_category
+
+
+12. ПОРЯДОК ЗАГРУЗКИ DIMENSION (Silver -> Gold)
+--------------------------------------------------------------------------------
+
+  1. dim_date       (генерация календаря)
+  2. dim_country
+  3. dim_city       (FK: country_key)
+  4. dim_category
+  5. dim_product    (FK: category_key; SCD2-логика)
+  6. dim_shop       (FK: city_key)
+  7. dim_customer   (FK: city_key)
+  8. dim_employee   (FK: shop_key, city_key)
+  9. fact_sales     (lookup всех surrogate keys)
+
+
+13. LOOKUP SURROGATE KEYS ДЛЯ FACT
+--------------------------------------------------------------------------------
+
+  date_key      = dim_date.date_key       WHERE full_date = DATE(sales_timestamp)
+  product_key   = dim_product.product_key WHERE product_id = ? AND
+                  sales_timestamp BETWEEN valid_from_dt AND valid_to_dt
+  customer_key  = dim_customer.customer_key  WHERE customer_id = ?
+  employee_key  = dim_employee.employee_key  WHERE employee_id = ?
+  shop_key      = dim_shop.shop_key          WHERE shop_id = ?
+  city_key      = dim_city.city_key          WHERE city_id = ?
+
+
+14. СВОДНАЯ STAR-СХЕМА
+--------------------------------------------------------------------------------
+
+                          dim_date
+                              |
+         dim_category <- dim_product
+                              |
+  dim_country <- dim_city <- dim_shop
+                    |    \      |
+                    |     dim_customer
+                    |           |
+                    +----- dim_employee
+                              |
+                         fact_sales
+                    (sales_key, measures,
+                     FK -> all dim_* keys)
+
+
+15. ВЫВОД
+--------------------------------------------------------------------------------
+
+  Dimension tables:  8 (>= 7)
+  SCD Type 2:        dim_product (valid_from_dt, valid_to_dt, is_current)
+  SCD Type 1:        dim_category, dim_customer, dim_employee,
+                     dim_shop, dim_city, dim_country
+  Type 0:            dim_date
+
+  fact_sales -> surrogate keys only
+  Business keys -> хранятся в dimension как атрибуты
+  Dimension -> справочники без транзакционных метрик
+
+================================================================================
