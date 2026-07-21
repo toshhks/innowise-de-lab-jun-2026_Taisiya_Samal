@@ -1,0 +1,103 @@
+================================================================================
+        ОТЧЁТ: DATA MARTS (ВИТРИНЫ ДАННЫХ) ДЛЯ BI
+                    EcoMarket DWH | Этап 6
+================================================================================
+
+1. СХЕМА И ОБЪЕКТЫ
+--------------------------------------------------------------------------------
+
+  Schema: mart
+
+  Объект                    | Тип                  | Назначение
+  --------------------------|----------------------|-----------------------------
+  mart.dim_location         | VIEW                 | Slicers: Country / City
+  mart.mart_daily_anomaly   | MATERIALIZED VIEW    | Аномалии выручки
+  mart.mart_shop_daily      | MATERIALIZED VIEW    | География магазинов
+  mart.mart_customer_behavior | MATERIALIZED VIEW  | Сегменты клиентов
+  mart.mart_employee_performance | MATERIALIZED VIEW | Эффективность персонала
+  mart.mart_product_seasonality | MATERIALIZED VIEW | Сезонность категорий
+
+
+2. ИНТЕГРАЦИЯ С BI (КРОСС-ФИЛЬТРАЦИЯ)
+--------------------------------------------------------------------------------
+
+  Справочник: mart.dim_location
+
+  Поля для Slicers:
+    - country_name, country_code  (фильтр по стране)
+    - city_name, city_id          (фильтр по городу)
+    - location_key                (PK для связи)
+
+  Связь с витринами: 1 : Many
+    dim_location (1)  --->  mart_* (Many)
+    по полю: location_key
+
+  Витрины с location_key:
+    - mart_daily_anomaly
+    - mart_shop_daily
+    - mart_customer_behavior
+    - mart_employee_performance
+
+  mart_product_seasonality — без location_key (анализ по категориям/времени)
+
+
+3. ОПИСАНИЕ ВИТРИН
+--------------------------------------------------------------------------------
+
+3.1 mart_daily_anomaly (Line chart)
+  Grain: shop + day
+  Поля:
+    full_date, revenue, expected_revenue (avg 30 prev days), uplift
+    shop_id, shop_address, location_key, country_name, city_name
+  uplift = revenue - expected_revenue
+
+3.2 mart_shop_daily (Map / Stacked column)
+  Grain: shop + day
+  Поля:
+    country_name, city_name, shop_address
+    daily_revenue, avg_daily_revenue (средняя по магазину за всю историю)
+    year_num, month_num, quarter_num
+
+3.3 mart_customer_behavior (Pie / Donut)
+  Grain: location + activity_status + revenue_segment
+  activity_status: Active (покупка за 90 дней) / Inactive
+  revenue_segment: High (>=500) / Medium (>=150) / Low
+  Метрики: customer_count, segment_revenue
+
+3.4 mart_employee_performance (Bar chart)
+  Grain: employee
+  performance_group: Leader / Average / Outsider (NTILE по profit)
+  Метрики: total_profit, total_revenue, margin_ratio
+
+3.5 mart_product_seasonality (Line / Area)
+  Grain: category + year + month
+  seasonality_index = quantity / avg_monthly_quantity
+  is_peak_period — пик продаж категории в данном месяце
+
+
+4. ФАЙЛЫ И ЗАПУСК
+--------------------------------------------------------------------------------
+
+  gold/sql/mart/01_mart_views.sql     — создание schema + views
+  gold/sql/mart/02_refresh_marts.sql — обновление materialized views
+  gold/mart_etl_pipeline.py          — оркестратор
+
+  Запуск (после Gold):
+    python mart_etl_pipeline.py
+
+  Обновление витрин:
+    выполнить gold/sql/mart/02_refresh_marts.sql
+
+
+5. МОДЕЛЬ ДЛЯ POWER BI / TABLEAU
+--------------------------------------------------------------------------------
+
+  Relationships:
+    dim_location[location_key]  (1)  -->  (*) mart_shop_daily[location_key]
+    dim_location[location_key]  (1)  -->  (*) mart_daily_anomaly[location_key]
+    dim_location[location_key]  (1)  -->  (*) mart_customer_behavior[location_key]
+    dim_location[location_key]  (1)  -->  (*) mart_employee_performance[location_key]
+
+  Cross-filtering: фильтр Country/City на dim_location фильтрует все связанные витрины.
+
+================================================================================
